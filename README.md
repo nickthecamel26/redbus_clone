@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RedBus Clone
 
-## Getting Started
+Full-stack bus booking application with FastAPI backend and React frontend.
 
-First, run the development server:
+## Project Structure
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```
+redbus-clone/
+├── backend/          # FastAPI + PostgreSQL
+├── frontend/         # React + Vite + Tailwind CSS
+└── docker-compose.yml
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Quick Start
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 1. Start Infrastructure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+docker-compose up -d
+```
 
-## Learn More
+Services:
+- **PostgreSQL**: `localhost:5432` (user: postgres, pass: postgres, db: redbus)
+- **PgAdmin**: `http://localhost:5050` (email: admin@redbus.com, pass: admin)
+- **Backend API**: `http://localhost:8000`
 
-To learn more about Next.js, take a look at the following resources:
+### 2. Backend Setup
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # macOS/Linux
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### 3. Frontend Setup
 
-## Deploy on Vercel
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Frontend runs at `http://localhost:5173`
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## API Documentation
+
+Once running, view interactive API docs at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+## Database Connection via PgAdmin
+
+1. Open `http://localhost:5050`
+2. Login: `admin@redbus.com` / `admin`
+3. Add new server:
+   - Name: redbus
+   - Host: `postgres`
+   - Port: `5432`
+   - Username: `postgres`
+   - Password: `postgres`
