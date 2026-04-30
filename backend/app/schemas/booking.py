@@ -1,28 +1,25 @@
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
-from decimal import Decimal
-from app.models.booking import BookingStatus, PaymentStatus
+from app.models.booking import BookingStatus
 
 class BookingBase(BaseModel):
-    seat_numbers: str
+    pass
 
 class BookingCreate(BookingBase):
-    route_id: int
+    trip_id: int
+    seat_id: int
 
 class BookingUpdate(BaseModel):
-    seat_numbers: Optional[str] = None
     status: Optional[BookingStatus] = None
-    payment_status: Optional[PaymentStatus] = None
 
-class Booking(BookingBase):
+class BookingResponse(BookingBase):
     id: int
     user_id: int
-    route_id: int
-    total_fare: Decimal
+    trip_id: int
+    seat_id: int
     status: BookingStatus
-    payment_status: PaymentStatus
-    booked_at: datetime
+    booking_date: datetime
     
     class Config:
         from_attributes = True

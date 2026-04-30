@@ -3,8 +3,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.models.base import Base
+from app.models import User, Bus, Route, Trip, Seat, Booking
 
-engine = create_engine(settings.DATABASE_URL or "postgresql://postgres:postgres@localhost:5432/redbus")
+# Use credentials from docker-compose.yml
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL or "postgresql://postgres:postgres@localhost:5432/redbus"
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
@@ -13,3 +17,6 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def create_tables():
+    Base.metadata.create_all(bind=engine)

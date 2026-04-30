@@ -1,4 +1,6 @@
-from app.schemas.user import User, UserCreate, UserUpdate
-from app.schemas.bus import Bus, BusCreate, BusUpdate
-from app.schemas.route import Route, RouteCreate, RouteUpdate, RouteSearch
-from app.schemas.booking import Booking, BookingCreate, BookingUpdate
+from app.schemas.user import UserBase, UserCreate, UserUpdate, UserResponse
+from app.schemas.bus import BusBase, BusCreate, BusUpdate, BusResponse
+from app.schemas.route import RouteBase, RouteCreate, RouteUpdate, RouteResponse
+from app.schemas.trip import TripBase, TripCreate, TripUpdate, TripResponse
+from app.schemas.seat import SeatBase, SeatCreate, SeatUpdate, SeatResponse
+from app.schemas.booking import BookingBase, BookingCreate, BookingUpdate, BookingResponse

@@ -5,19 +5,19 @@ import enum
 from app.models.base import Base
 
 class BusType(str, enum.Enum):
-    AC_SEATER = "ac_seater"
-    AC_SLEEPER = "ac_sleeper"
-    NON_AC_SEATER = "non_ac_seater"
-    NON_AC_SLEEPER = "non_ac_sleeper"
+    AC_SLEEPER = "AC Sleeper"
+    NON_AC_SLEEPER = "Non-AC Sleeper"
+    AC_SEATER = "AC Seater"
+    NON_AC_SEATER = "Non-AC Seater"
 
 class Bus(Base):
     __tablename__ = "buses"
     
     id = Column(Integer, primary_key=True, index=True)
-    bus_number = Column(String, unique=True, index=True, nullable=False)
-    operator_name = Column(String, nullable=False)
+    name = Column(String, nullable=False)
     bus_type = Column(Enum(BusType), nullable=False)
-    capacity = Column(Integer, nullable=False)
+    total_seats = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    routes = relationship("Route", back_populates="bus")
+    seats = relationship("Seat", back_populates="bus", cascade="all, delete-orphan")
+    trips = relationship("Trip", back_populates="bus", cascade="all, delete-orphan")
