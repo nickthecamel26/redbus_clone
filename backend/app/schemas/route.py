@@ -21,3 +21,8 @@ class RouteResponse(RouteBase):
     
     class Config:
         from_attributes = True
+
+class RouteSearch(BaseModel):
+    source: str
+    destination: str
+    travel_date: datetime

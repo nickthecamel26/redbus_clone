@@ -1,25 +1,25 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
-from app.schemas.bus import Bus, BusCreate, BusUpdate
+from app.schemas.bus import BusResponse, BusCreate, BusUpdate
 
 router = APIRouter()
 
-@router.get("/", response_model=List[Bus])
+@router.get("/", response_model=List[BusResponse])
 def get_buses():
     return []
 
-@router.post("/", response_model=Bus)
+@router.post("/", response_model=BusResponse)
 def create_bus(bus: BusCreate):
     # Placeholder - implement actual bus creation
     pass
 
-@router.get("/{bus_id}", response_model=Bus)
+@router.get("/{bus_id}", response_model=BusResponse)
 def get_bus(bus_id: int):
     # Placeholder - implement actual bus retrieval
     pass
 
-@router.put("/{bus_id}", response_model=Bus)
+@router.put("/{bus_id}", response_model=BusResponse)
 def update_bus(bus_id: int, bus: BusUpdate):
     # Placeholder - implement actual bus update
     pass

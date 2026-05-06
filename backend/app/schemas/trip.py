@@ -3,6 +3,9 @@ from typing import Optional
 from datetime import datetime
 from decimal import Decimal
 
+from app.schemas.bus import BusResponse
+from app.schemas.route import RouteResponse
+
 class TripBase(BaseModel):
     bus_id: int
     route_id: int
@@ -22,6 +25,24 @@ class TripUpdate(BaseModel):
 
 class TripResponse(TripBase):
     id: int
+    bus: Optional[BusResponse] = None
+    route: Optional[RouteResponse] = None
+    
+    class Config:
+        from_attributes = True
+
+class TripSearch(BaseModel):
+    source: str
+    destination: str
+    date: datetime
+
+class TripSearchResult(BaseModel):
+    id: int
+    bus_name: str
+    departure_time: datetime
+    arrival_time: datetime
+    available_seats: int
+    price: Decimal
     
     class Config:
         from_attributes = True

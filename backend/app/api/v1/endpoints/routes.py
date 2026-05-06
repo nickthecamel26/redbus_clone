@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from datetime import datetime
 
-from app.schemas.route import Route, RouteCreate, RouteUpdate, RouteSearch
+from app.schemas.route import RouteResponse, RouteCreate, RouteUpdate, RouteSearch
 
 router = APIRouter()
 
@@ -11,21 +11,21 @@ def search_routes(source: str, destination: str, date: datetime):
     # Placeholder - implement actual route search
     return []
 
-@router.get("/", response_model=List[Route])
+@router.get("/", response_model=List[RouteResponse])
 def get_routes():
     return []
 
-@router.post("/", response_model=Route)
+@router.post("/", response_model=RouteResponse)
 def create_route(route: RouteCreate):
     # Placeholder - implement actual route creation
     pass
 
-@router.get("/{route_id}", response_model=Route)
+@router.get("/{route_id}", response_model=RouteResponse)
 def get_route(route_id: int):
     # Placeholder - implement actual route retrieval
     pass
 
-@router.put("/{route_id}", response_model=Route)
+@router.put("/{route_id}", response_model=RouteResponse)
 def update_route(route_id: int, route: RouteUpdate):
     # Placeholder - implement actual route update
     pass

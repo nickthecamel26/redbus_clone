@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, ForeignKey, DateTime, Enum
+from sqlalchemy import Column, Integer, ForeignKey, DateTime, Enum,Numeric
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -17,6 +17,7 @@ class Booking(Base):
     trip_id = Column(Integer, ForeignKey("trips.id"), nullable=False)
     seat_id = Column(Integer, ForeignKey("seats.id"), nullable=False)
     status = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
+    total_price = Column(Numeric(10, 2), nullable=False)
     booking_date = Column(DateTime(timezone=True), server_default=func.now())
     
     user = relationship("User", back_populates="bookings")

@@ -26,10 +26,17 @@ if config.config_file_name is not None:
 # Set target metadata for autogenerate support
 target_metadata = Base.metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+# Get database URL from environment variable or use default
+def get_database_url():
+    # Check for DATABASE_URL in environment
+    db_url = os.getenv('DATABASE_URL')
+    if db_url:
+        return db_url
+    # Fall back to config file
+    return config.get_main_option("sqlalchemy.url")
+
+# Override sqlalchemy.url with env var if present
+config.set_main_option('sqlalchemy.url', get_database_url())
 
 
 def run_migrations_offline() -> None:

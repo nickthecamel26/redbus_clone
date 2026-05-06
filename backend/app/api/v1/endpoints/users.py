@@ -1,25 +1,25 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
-from app.schemas.user import User, UserCreate, UserUpdate
+from app.schemas.user import UserResponse, UserCreate, UserUpdate
 
 router = APIRouter()
 
-@router.get("/", response_model=List[User])
+@router.get("/", response_model=List[UserResponse])
 def get_users():
     return []
 
-@router.post("/", response_model=User)
+@router.post("/", response_model=UserResponse)
 def create_user(user: UserCreate):
     # Placeholder - implement actual user creation
     pass
 
-@router.get("/{user_id}", response_model=User)
+@router.get("/{user_id}", response_model=UserResponse)
 def get_user(user_id: int):
     # Placeholder - implement actual user retrieval
     pass
 
-@router.put("/{user_id}", response_model=User)
+@router.put("/{user_id}", response_model=UserResponse)
 def update_user(user_id: int, user: UserUpdate):
     # Placeholder - implement actual user update
     pass
