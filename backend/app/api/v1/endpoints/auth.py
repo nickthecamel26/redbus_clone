@@ -14,13 +14,13 @@ router = APIRouter()
 class UserSignup(BaseModel):
     email: EmailStr
     password: str
-    name: str
+    full_name: str
     phone: str = None
 
 class UserResponse(BaseModel):
     id: int
     email: str
-    name: str
+    full_name: str
     phone: str = None
     
     class Config:
@@ -42,7 +42,7 @@ def signup(user_data: UserSignup, db: Session = Depends(get_db)):
     new_user = User(
         email=user_data.email,
         hashed_password=hashed_password,
-        full_name=user_data.name,  # Map schema 'name' to model 'full_name'
+        full_name=user_data.full_name,
         phone=user_data.phone,
         role="customer"
     )
@@ -86,6 +86,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         "user": {
             "id": user.id,
             "email": user.email,
-            "name": user.full_name  # Return full_name as name in response
+            "full_name": user.full_name
         }
     }

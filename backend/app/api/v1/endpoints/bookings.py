@@ -15,6 +15,7 @@ from app.models.route import Route
 from app.models.user import User
 from app.schemas.booking import BookingResponse, BookingCreate, BookingUpdate, BookingSummary, MyBooking
 from app.core.security import get_current_user
+from app.tasks import release_unpaid_seats
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -121,6 +122,11 @@ def create_booking(
         # Commit the transaction (session from Depends handles this)
         db.commit()
         logger.info(f"Atomic transaction committed - {len(created_bookings)} bookings created")
+        
+        # Trigger Celery task to release unpaid seats after 10 minutes
+        booking_ids = [b.id for b in created_bookings]
+        release_unpaid_seats.apply_async(args=[booking_ids], countdown=600)  # 600 seconds = 10 minutes
+        logger.info(f"Scheduled release_unpaid_seats task for booking_ids: {booking_ids} (in 10 minutes)")
         
         logger.info(f"Successfully created {len(created_bookings)} bookings")
         
