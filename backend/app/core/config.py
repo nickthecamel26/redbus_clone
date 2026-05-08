@@ -10,9 +10,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/redbus")
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
     
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow"  # Allow extra environment variables
 
 settings = Settings()

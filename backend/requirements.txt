@@ -12,3 +12,6 @@ pytest
 httpx
 celery
 redis
+razorpay
+requests
+python-dotenv

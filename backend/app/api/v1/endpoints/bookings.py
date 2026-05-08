@@ -15,16 +15,64 @@ from app.models.route import Route
 from app.models.user import User
 from app.schemas.booking import BookingResponse, BookingCreate, BookingUpdate, BookingSummary, MyBooking
 from app.core.security import get_current_user
+from app.core.logger import logger
+from app.core.redis import invalidate_seats_cache
 from app.tasks import release_unpaid_seats
-
-# Set up logger
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/", response_model=List[BookingResponse])
 def get_bookings(db: Session = Depends(get_db)):
     bookings = db.query(Booking).all()
     return bookings
+
+@router.get("/me", response_model=List[MyBooking])
+def get_my_bookings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all bookings for the currently authenticated user."""
+    try:
+        logger.info(f"User {current_user.id} fetched booking history")
+        
+        # Query all bookings for current user with trip, bus, route, and seat details
+        bookings = (
+            db.query(Booking)
+            .options(
+                joinedload(Booking.trip)
+                .joinedload(Trip.bus),
+                joinedload(Booking.trip)
+                .joinedload(Trip.route),
+                joinedload(Booking.seat)
+            )
+            .filter(Booking.user_id == current_user.id)
+            .order_by(Booking.booking_date.desc())  # Most recent first
+            .all()
+        )
+        
+        # Transform to response format matching MyBooking schema
+        my_bookings = []
+        for booking in bookings:
+            trip = booking.trip
+            bus = trip.bus if trip else None
+            route = trip.route if trip else None
+            
+            my_booking = MyBooking(
+                booking_id=booking.id,
+                bus_name=bus.name if bus else "Unknown Bus",
+                source=route.source_city if route else "Unknown",
+                destination=route.destination_city if route else "Unknown",
+                travel_date=trip.departure_time if trip else booking.booking_date,
+                seat_numbers=[booking.seat.seat_number] if booking.seat else [],
+                status=booking.status.value,  # Convert enum to string value
+                total_price=booking.total_price
+            )
+            my_bookings.append(my_booking)
+        
+        return my_bookings
+        
+    except Exception as e:
+        logger.error(f"Error fetching booking history for user {current_user.id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch booking history")
 
 @router.post("/", response_model=BookingSummary)
 def create_booking(
@@ -48,55 +96,78 @@ def create_booking(
     
     # Use pessimistic locking for seat availability check
     try:
-        # Lock the seats for update (pessimistic locking) - session already active from Depends
+        # Step 1: Lock the seats for update (pessimistic locking)
+        # This prevents other transactions from modifying these rows until we commit
         seats = (
             db.query(Seat)
             .filter(Seat.id.in_(booking_data.seat_ids))
-            .with_for_update(nowait=True)  # Lock rows, fail fast if locked
+            .with_for_update(nowait=True)  # Lock rows, fail fast if already locked
             .all()
         )
-        
+
         if len(seats) != len(booking_data.seat_ids):
-            logger.error(f"Some seats not found. Requested: {booking_data.seat_ids}, Found: {[s.id for s in seats]}")
+            logger.error(
+                f"Some seats not found. Requested: {booking_data.seat_ids}, "
+                f"Found: {[s.id for s in seats]}"
+            )
             raise HTTPException(status_code=400, detail="Some seats not found")
-        
-        # Check if seats are available and belong to correct bus
+
+        # Step 2: Validate seats belong to correct bus and are available
         for seat in seats:
+            # Check seat belongs to this trip's bus
             if seat.bus_id != trip.bus_id:
-                logger.error(f"Seat {seat.id} belongs to bus {seat.bus_id}, but trip uses bus {trip.bus_id}")
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Seat {seat.id} does not belong to this trip's bus"
+                logger.error(
+                    f"Seat {seat.id} belongs to bus {seat.bus_id}, "
+                    f"but trip uses bus {trip.bus_id}"
                 )
-            # Check if seat is available
-            if not seat.is_available:
-                logger.warning(f"Seat {seat.id} ({seat.seat_number}) is not available")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Seat {seat.seat_number} is not available"
+                    detail=f"Seat {seat.id} does not belong to this trip's bus"
                 )
-        
-        # Check for existing active bookings on these seats for this trip
-        existing_bookings = db.query(Booking).filter(
-            Booking.trip_id == booking_data.trip_id,
-            Booking.seat_id.in_(booking_data.seat_ids),
-            Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.PENDING])
-        ).all()
-        
+
+            # Step 3: Check if seat is still available after acquiring lock
+            # If another transaction booked it while we were waiting, is_available will be False
+            if not seat.is_available:
+                logger.warning(
+                    f"Seat {seat.id} ({seat.seat_number}) is no longer available "
+                    f"after lock acquisition"
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Seat {seat.seat_number} is no longer available."
+                )
+
+        # Step 4: Double-check for any active bookings in the database
+        # This prevents race conditions where booking was created but seat flag not updated
+        existing_bookings = (
+            db.query(Booking)
+            .filter(
+                Booking.trip_id == booking_data.trip_id,
+                Booking.seat_id.in_(booking_data.seat_ids),
+                Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.PENDING])
+            )
+            .all()
+        )
+
         if existing_bookings:
             booked_seat_ids = [b.seat_id for b in existing_bookings]
-            logger.warning(f"Seats already have active bookings: {booked_seat_ids}")
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Seats {booked_seat_ids} are already booked for this trip"
+            booked_seats = db.query(Seat).filter(Seat.id.in_(booked_seat_ids)).all()
+            seat_numbers = [s.seat_number for s in booked_seats]
+
+            logger.warning(
+                f"Seats already have active bookings: {booked_seat_ids} ({seat_numbers})"
             )
-        
-        # Create bookings for each seat within the existing session transaction
+            raise HTTPException(
+                status_code=400,
+                detail=f"Seat {seat_numbers[0]} is no longer available."
+            )
+
+        # Step 5: Create bookings for each seat within the transaction (Atomic)
         created_bookings = []
         for seat in seats:
-            # Mark seat as unavailable
+            # Atomic: Mark seat as unavailable within same transaction
             seat.is_available = False
-            logger.info(f"Marked seat {seat.id} ({seat.seat_number}) as unavailable")
+            logger.info(f"[Atomic] Marked seat {seat.id} ({seat.seat_number}) is_available=False")
             
             # Create booking
             booking = Booking(
@@ -122,11 +193,19 @@ def create_booking(
         # Commit the transaction (session from Depends handles this)
         db.commit()
         logger.info(f"Atomic transaction committed - {len(created_bookings)} bookings created")
-        
+
+        # Invalidate Redis cache for this trip to ensure fresh seat availability data
+        invalidate_seats_cache(booking_data.trip_id)
+        logger.info(f"[CACHE INVALIDATE] Cleared cache for trip_id={booking_data.trip_id}")
+
         # Trigger Celery task to release unpaid seats after 10 minutes
         booking_ids = [b.id for b in created_bookings]
         release_unpaid_seats.apply_async(args=[booking_ids], countdown=600)  # 600 seconds = 10 minutes
         logger.info(f"Scheduled release_unpaid_seats task for booking_ids: {booking_ids} (in 10 minutes)")
+        
+        # Log successful booking creation with structured data
+        seat_ids = [b.seat_id for b in created_bookings]
+        logger.info(f"BOOKING_CREATED: user_id={user_id}, trip_id={booking_data.trip_id}, booking_ids={booking_ids}, seat_ids={seat_ids}")
         
         logger.info(f"Successfully created {len(created_bookings)} bookings")
         
@@ -141,73 +220,26 @@ def create_booking(
         raise
     except Exception as e:
         db.rollback()
-        # Check for lock-related errors
+        # Check for lock-related errors (concurrency conflicts)
         error_str = str(e).lower()
-        if "lock" in error_str or "could not obtain" in error_str or "resource busy" in error_str:
+        if "lock" in error_str or "could not obtain" in error_str or "resource busy" in error_str or "nowait" in error_str:
             logger.error(f"Lock conflict during booking: {e}")
             raise HTTPException(
-                status_code=409, 
-                detail="Seat is currently being processed by another user. Please try again."
+                status_code=400,
+                detail="This seat is currently being booked by another user. Please try again in a moment."
+            )
+        # Handle serialization errors and other database concurrency issues
+        from sqlalchemy.exc import OperationalError, IntegrityError
+        if isinstance(e, (OperationalError, IntegrityError)):
+            logger.error(f"Database serialization error during booking: {type(e).__name__}: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="This seat is currently being booked by another user. Please try again in a moment."
             )
         logger.error(f"Exception in create_booking: {type(e).__name__}: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {type(e).__name__}: {e}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Exception in create_booking: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal server error: {type(e).__name__}: {e}")
 
-@router.get("/my-bookings", response_model=List[MyBooking])
-def get_my_bookings(db: Session = Depends(get_db)):
-    """Get all bookings for the current user with trip and bus details."""
-    # Hardcoded user_id for now (until frontend login is integrated)
-    user_id = 1
-    
-    # Query bookings with joined data
-    bookings = (
-        db.query(Booking)
-        .options(
-            joinedload(Booking.trip).joinedload(Trip.bus),
-            joinedload(Booking.trip).joinedload(Trip.route),
-            joinedload(Booking.seat)
-        )
-        .filter(Booking.user_id == user_id)
-        .order_by(Booking.booking_date.desc())
-        .all()
-    )
-    
-    # Group bookings by trip_id to aggregate seat numbers
-    from collections import defaultdict
-    trip_bookings = defaultdict(list)
-    
-    for booking in bookings:
-        trip_bookings[booking.trip_id].append(booking)
-    
-    # Build MyBooking responses
-    my_bookings = []
-    for trip_id, trip_booking_list in trip_bookings.items():
-        first_booking = trip_booking_list[0]
-        trip = first_booking.trip
-        bus = trip.bus
-        route = trip.route
-        
-        # Collect all seat numbers for this trip
-        seat_numbers = [booking.seat.seat_number for booking in trip_booking_list]
-        
-        my_bookings.append(MyBooking(
-            booking_id=first_booking.id,
-            bus_name=bus.name,
-            source=route.source_city,
-            destination=route.destination_city,
-            travel_date=trip.departure_time,
-            seat_numbers=seat_numbers,
-            status=first_booking.status,
-            total_price=first_booking.total_price * len(seat_numbers) if first_booking.total_price else None
-        ))
-    
-    return my_bookings
 
 
 @router.get("/{booking_id}", response_model=BookingResponse)
@@ -219,6 +251,63 @@ def get_booking(booking_id: int):
 def update_booking(booking_id: int, booking: BookingUpdate):
     # Placeholder - implement actual booking update
     pass
+
+@router.patch("/{booking_id}/confirm", response_model=dict)
+def confirm_booking(
+    booking_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Confirm a booking (mark as CONFIRMED to prevent auto-release)."""
+    try:
+        logger.info(f"Attempting to confirm booking {booking_id} for user {current_user.id}")
+        
+        # Fetch the booking
+        booking = db.query(Booking).filter(Booking.id == booking_id).first()
+        
+        if not booking:
+            logger.warning(f"Booking {booking_id} not found")
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        # Verify ownership
+        if booking.user_id != current_user.id:
+            logger.warning(f"User {current_user.id} cannot confirm booking {booking_id} (belongs to user {booking.user_id})")
+            raise HTTPException(status_code=403, detail="You can only confirm your own bookings")
+        
+        # Check current status
+        if booking.status == BookingStatus.CONFIRMED:
+            logger.info(f"Booking {booking_id} is already confirmed")
+            return {"message": "Booking is already confirmed", "booking_id": booking_id, "status": "CONFIRMED"}
+        
+        if booking.status == BookingStatus.CANCELLED:
+            logger.warning(f"Cannot confirm booking {booking_id} - it has been cancelled/expired")
+            raise HTTPException(status_code=400, detail="Cannot confirm a cancelled/expired booking")
+        
+        # Update status to CONFIRMED
+        booking.status = BookingStatus.CONFIRMED
+        db.commit()
+        db.refresh(booking)
+        
+        # Log successful booking confirmation with structured data
+        app_logger.info(f"BOOKING_CONFIRMED: user_id={current_user.id}, booking_id={booking_id}, trip_id={booking.trip_id}, seat_id={booking.seat_id}")
+        logger.info(f"Successfully confirmed booking {booking_id}")
+        
+        return {
+            "message": "Booking confirmed successfully",
+            "booking_id": booking.id,
+            "status": "CONFIRMED",
+            "trip_id": booking.trip_id,
+            "seat_id": booking.seat_id,
+            "total_price": float(booking.total_price) if booking.total_price else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Exception in confirm_booking: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Internal server error: {type(e).__name__}: {e}")
+
 
 @router.patch("/{booking_id}/cancel", response_model=dict)
 def cancel_booking(

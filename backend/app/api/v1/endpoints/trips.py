@@ -11,6 +11,7 @@ from app.models.seat import Seat
 from app.models.booking import Booking, BookingStatus
 from app.schemas.trip import TripResponse, TripCreate, TripUpdate, TripSearchResult
 from app.schemas.seat import SeatWithStatus, SeatWithPricing
+from app.core.redis import get_cached_seats, set_cached_seats
 from decimal import Decimal
 
 router = APIRouter()
@@ -94,8 +95,18 @@ def delete_trip(trip_id: int):
 @router.get("/{trip_id}/seats", response_model=List[SeatWithPricing])
 def get_trip_seats(trip_id: int, db: Session = Depends(get_db)):
     """Get all seats for a trip with dynamic pricing and row/column layout."""
+    print(f"DEBUG: Entered get_trip_seats route with trip_id={trip_id}")
     try:
         print(f"[DEBUG] Fetching seats for trip_id={trip_id}")
+
+        # Cache-Aside Pattern: Check Redis cache first
+        cached_seats = get_cached_seats(trip_id, SeatWithPricing)
+        if cached_seats is not None:
+            print(f"[CACHE HIT] Returning cached seats for trip_id={trip_id}")
+            # TypeAdapter already returns list of SeatWithPricing models
+            return cached_seats
+
+        print(f"[CACHE MISS] No cached data found for trip_id={trip_id}, querying database")
         
         # Get the trip with its bus
         trip = db.query(Trip).filter(Trip.id == trip_id).first()
@@ -159,7 +170,12 @@ def get_trip_seats(trip_id: int, db: Session = Depends(get_db)):
             seats_by_row[row].append(seat)
         
         print(f"[DEBUG] Returning {len(seat_status_list)} seats grouped into {len(seats_by_row)} rows")
-        
+
+        # Cache-Aside Pattern: Store result in Redis with 60s TTL
+        # Pass SeatWithPricing models directly - TypeAdapter handles serialization
+        set_cached_seats(trip_id, seat_status_list, ttl=60)
+        print(f"[CACHE SET] Stored {len(seat_status_list)} seats in cache for trip_id={trip_id}")
+
         return seat_status_list
     except HTTPException:
         raise

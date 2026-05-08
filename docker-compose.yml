@@ -5,11 +5,11 @@ services:
     image: redis:7-alpine
     container_name: redbus_redis
     ports:
-      - "6379:6379"
+      - '6379:6379'
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -22,11 +22,11 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: redbus
     ports:
-      - "5432:5432"
+      - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -39,7 +39,7 @@ services:
       PGADMIN_DEFAULT_PASSWORD: admin
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
-      - "5050:80"
+      - '5050:80'
     depends_on:
       - postgres
 
@@ -47,12 +47,15 @@ services:
     build: ./backend
     container_name: redbus_backend
     ports:
-      - "8000:8000"
+      - '8000:8000'
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/redbus
       - REDIS_URL=redis://redis:6379/0
       - SECRET_KEY=your-secret-key-change-in-production
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
+      - RAZORPAY_KEY_ID=rzp_test_SmP3db28uYI4oX
+      - RAZORPAY_KEY_SECRET=Kwn19yfY1cgHMLqrp30o5hNG
+      - RAZORPAY_WEBHOOK_SECRET=whsec_test_1234567890abcdef
     depends_on:
       postgres:
         condition: service_healthy

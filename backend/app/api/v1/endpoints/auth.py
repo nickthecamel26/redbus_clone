@@ -2,32 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import timedelta
+from typing import Optional
 
 from app.core import security
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
-from pydantic import BaseModel, EmailStr
+from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter()
 
-class UserSignup(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str
-    phone: str = None
-
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    full_name: str
-    phone: str = None
-    
-    class Config:
-        from_attributes = True
-
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def signup(user_data: UserSignup, db: Session = Depends(get_db)):
+def signup(user_data: UserCreate, db: Session = Depends(get_db)):
     """Create a new user account."""
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == user_data.email).first()
