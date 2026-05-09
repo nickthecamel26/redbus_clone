@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, date, time
 from decimal import Decimal
 
 from app.schemas.bus import BusResponse
@@ -43,6 +43,18 @@ class TripSearchResult(BaseModel):
     arrival_time: datetime
     available_seats: int
     price: Decimal
+    
+    class Config:
+        from_attributes = True
+
+class BulkScheduleRequest(BaseModel):
+    bus_id: int
+    route_id: int
+    start_date: date
+    number_of_days: int
+    departure_time_daily: time
+    travel_duration_hours: float
+    base_price: Optional[Decimal] = None
     
     class Config:
         from_attributes = True

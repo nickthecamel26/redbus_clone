@@ -47,7 +47,7 @@ services:
     build: ./backend
     container_name: redbus_backend
     ports:
-      - '8000:8000'
+      - '8001:8000'  # External:Internal mapping
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/redbus
       - REDIS_URL=redis://redis:6379/0
@@ -56,6 +56,7 @@ services:
       - RAZORPAY_KEY_ID=rzp_test_SmP3db28uYI4oX
       - RAZORPAY_KEY_SECRET=Kwn19yfY1cgHMLqrp30o5hNG
       - RAZORPAY_WEBHOOK_SECRET=whsec_test_1234567890abcdef
+      - RUNNING_IN_DOCKER=true  # For environment detection
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,7 +64,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   celery_worker:
     build: ./backend

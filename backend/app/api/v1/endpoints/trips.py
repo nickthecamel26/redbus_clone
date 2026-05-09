@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
@@ -9,16 +10,28 @@ from app.models.route import Route
 from app.models.bus import Bus
 from app.models.seat import Seat
 from app.models.booking import Booking, BookingStatus
-from app.schemas.trip import TripResponse, TripCreate, TripUpdate, TripSearchResult
+from app.schemas.trip import TripResponse, TripCreate, TripUpdate, TripSearchResult, BulkScheduleRequest
 from app.schemas.seat import SeatWithStatus, SeatWithPricing
-from app.core.redis import get_cached_seats, set_cached_seats
+from app.core.redis import get_cached_seats, set_cached_seats, get_cached_search_results, set_cached_search_results, invalidate_booking_cache, clear_search_cache
 from decimal import Decimal
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 @router.get("/", response_model=List[TripResponse])
-def get_trips():
-    return []
+def get_trips(db: Session = Depends(get_db)):
+    """Get all upcoming trips (departure_time >= now)."""
+    now = datetime.now()
+    trips = (
+        db.query(Trip)
+        .options(joinedload(Trip.bus), joinedload(Trip.route))
+        .filter(Trip.departure_time >= now)
+        .order_by(Trip.departure_time)
+        .all()
+    )
+    logger.info(f"Retrieved {len(trips)} upcoming trips")
+    return trips
 
 @router.get("/search", response_model=List[TripSearchResult])
 def search_trips(
@@ -28,37 +41,60 @@ def search_trips(
     db: Session = Depends(get_db)
 ):
     """Search for trips by source, destination, and date with available seat counts."""
+    print(f"DEBUG: Entered search_trips route with source={source}, destination={destination}, travel_date={travel_date}")
+
+    # Cache-Aside Pattern: Check Redis cache first
+    travel_date_str = travel_date.isoformat()
+    cached_results = get_cached_search_results(source, destination, travel_date_str, TripSearchResult)
+    if cached_results is not None:
+        print(f"[CACHE HIT] Returning cached search results for {source} -> {destination} on {travel_date_str}")
+        return cached_results
+
+    print(f"[CACHE MISS] No cached data found for {source} -> {destination} on {travel_date_str}, querying database")
+
     # Calculate start and end of the travel date (naive datetime for comparison with DB)
     start_of_day = datetime.combine(travel_date, datetime.min.time())
     end_of_day = datetime.combine(travel_date, datetime.max.time())
     
     # Query trips matching criteria
+    print(f"[DEBUG] Search parameters: source='{source}', destination='{destination}', start_of_day={start_of_day}, end_of_day={end_of_day}")
+    
     trips = (
         db.query(Trip)
         .join(Route)
         .join(Bus)
         .filter(Route.source_city.ilike(f"%{source}%"))
         .filter(Route.destination_city.ilike(f"%{destination}%"))
-        .filter(Trip.departure_time >= start_of_day)
-        .filter(Trip.departure_time <= end_of_day)
+        .filter(Trip.departure_time.between(start_of_day, end_of_day))
         .options(joinedload(Trip.route), joinedload(Trip.bus))
         .all()
     )
     
+    print(f"[DEBUG] Found {len(trips)} trips before filtering")
+    
+    # Debug: Print route information for found trips
+    for trip in trips:
+        print(f"[DEBUG] Found Trip {trip.id}: Route='{trip.route.source_city} -> {trip.route.destination_city}', Departure={trip.departure_time}, Bus='{trip.bus.name}'")
+    
     # Build search results with available seat counts
     results = []
+    print(f"[DEBUG] Processing {len(trips)} trips for search results")
+    
     for trip in trips:
         # Get total seats for this trip's bus
         total_seats = db.query(Seat).filter(Seat.bus_id == trip.bus_id).count()
-        
-        # Get booked seats count for this trip
-        booked_seats = db.query(Booking).filter(
+
+        # Get occupied seats count for this trip (both CONFIRMED and PENDING bookings)
+        occupied_seats = db.query(Booking).filter(
             Booking.trip_id == trip.id,
             Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.PENDING])
         ).count()
-        
+
         # Calculate available seats
-        available_seats = total_seats - booked_seats
+        available_seats = total_seats - occupied_seats
+
+        # Debug logging for seat availability
+        print(f"[DEBUG] Trip {trip.id}: Total={total_seats}, Occupied(Confirmed+Pending)={occupied_seats}, Available={available_seats}")
         
         result = TripSearchResult(
             id=trip.id,
@@ -69,7 +105,11 @@ def search_trips(
             price=Decimal(str(trip.price)) if trip.price else Decimal("0.00")
         )
         results.append(result)
-    
+
+    # Cache-Aside Pattern: Store result in Redis with 300s TTL (5 minutes)
+    set_cached_search_results(source, destination, travel_date_str, results, ttl=300)
+    print(f"[CACHE SET] Stored {len(results)} search results in cache for {source} -> {destination} on {travel_date_str}")
+
     return results
 
 @router.post("/", response_model=TripResponse)
@@ -182,3 +222,84 @@ def get_trip_seats(trip_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"[ERROR] Exception in get_trip_seats: {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {type(e).__name__}: {e}")
+
+@router.post("/bulk-schedule", response_model=List[TripResponse])
+def bulk_schedule_trips(request: BulkScheduleRequest, db: Session = Depends(get_db)):
+    """Schedule multiple trips in bulk for a bus on a route over several days."""
+    logger.info(f"[SCHEDULER] Starting bulk schedule: Bus {request.bus_id}, Route {request.route_id}, {request.number_of_days} days")
+    
+    try:
+        # Validate bus and route exist
+        bus = db.query(Bus).filter(Bus.id == request.bus_id).first()
+        if not bus:
+            logger.warning(f"[SCHEDULER] Bus {request.bus_id} not found")
+            raise HTTPException(status_code=404, detail=f"Bus {request.bus_id} not found")
+        
+        route = db.query(Route).filter(Route.id == request.route_id).first()
+        if not route:
+            logger.warning(f"[SCHEDULER] Route {request.route_id} not found")
+            raise HTTPException(status_code=404, detail=f"Route {request.route_id} not found")
+        
+        # Determine price (use provided base_price or fallback to route-based calculation)
+        if request.base_price:
+            base_price = request.base_price
+        else:
+            # Simple price calculation: distance_km * 2 (can be enhanced)
+            base_price = Decimal(str(route.distance_km)) * Decimal('2')
+        
+        created_trips = []
+        
+        # Generate trips for each day
+        for day_offset in range(request.number_of_days):
+            current_date = request.start_date + timedelta(days=day_offset)
+            
+            # Calculate departure and arrival times
+            departure_datetime = datetime.combine(current_date, request.departure_time_daily)
+            arrival_datetime = departure_datetime + timedelta(hours=request.travel_duration_hours)
+            
+            # Create trip
+            trip = Trip(
+                bus_id=request.bus_id,
+                route_id=request.route_id,
+                departure_time=departure_datetime,
+                arrival_time=arrival_datetime,
+                price=base_price
+            )
+            
+            db.add(trip)
+            created_trips.append(trip)
+        
+        # Commit all trips
+        db.commit()
+        
+        # Refresh trips to get IDs and relationships
+        for trip in created_trips:
+            db.refresh(trip)
+        
+        # Clear search cache for all scheduled dates to ensure new trips appear immediately
+        try:
+            # Clear cache for each day that was scheduled
+            for day_offset in range(request.number_of_days):
+                current_date = request.start_date + timedelta(days=day_offset)
+                date_str = current_date.isoformat()
+                
+                # Clear search cache for this specific route and date
+                clear_search_cache(
+                    source=route.source_city,
+                    destination=route.destination_city,
+                    date=date_str
+                )
+            
+            logger.info(f"[SCHEDULER] Cleared search cache for {request.number_of_days} days on route {route.source_city} -> {route.destination_city}")
+        except Exception as e:
+            logger.warning(f"[SCHEDULER] Cache clearing failed: {type(e).__name__}: {e}")
+        
+        logger.info(f"[SCHEDULER] Generated {len(created_trips)} trips for Bus {request.bus_id} on Route {request.route_id}")
+        return created_trips
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[SCHEDULER] Error in bulk schedule: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Bulk schedule failed: {str(e)}")

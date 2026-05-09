@@ -81,6 +81,8 @@ def release_unpaid_seats(self, booking_ids: List[int]):
                 logger.info(f"[Celery Task] Booking {booking_id} is {booking.status.value}, skipping")
         
         db.commit()
+        logger.info(f"[Celery Task] Released {released_count} seats from expired bookings")
+        
         return {"status": "success", "released": released_count}
         
     except Exception as exc:

@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from datetime import datetime, timezone
+from decimal import Decimal
 import logging
 import traceback
 
@@ -16,7 +17,8 @@ from app.models.user import User
 from app.schemas.booking import BookingResponse, BookingCreate, BookingUpdate, BookingSummary, MyBooking
 from app.core.security import get_current_user
 from app.core.logger import logger
-from app.core.redis import invalidate_seats_cache
+from app.core.redis import invalidate_booking_cache
+from app.crud.booking import cleanup_expired_bookings
 from app.tasks import release_unpaid_seats
 router = APIRouter()
 
@@ -77,6 +79,7 @@ def get_my_bookings(
 @router.post("/", response_model=BookingSummary)
 def create_booking(
     booking_data: BookingCreate, 
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -169,13 +172,20 @@ def create_booking(
             seat.is_available = False
             logger.info(f"[Atomic] Marked seat {seat.id} ({seat.seat_number}) is_available=False")
             
+            # Calculate pricing (base price + 10% premium for window seats)
+            base_price = trip.price
+            window_premium = base_price * Decimal('0.10') if seat.is_window else Decimal('0')
+            total_price = base_price + window_premium
+            
+            logger.info(f"[PRICING] Seat {seat.id} ({seat.seat_number}): Base={base_price}, Window={seat.is_window}, Premium={window_premium}, Total={total_price}")
+            
             # Create booking
             booking = Booking(
                 user_id=user_id,
                 trip_id=booking_data.trip_id,
                 seat_id=seat.id,
                 status=BookingStatus.PENDING,
-                total_price=trip.price
+                total_price=total_price
             )
             db.add(booking)
             db.flush()  # Flush to get the booking ID
@@ -195,13 +205,33 @@ def create_booking(
         logger.info(f"Atomic transaction committed - {len(created_bookings)} bookings created")
 
         # Invalidate Redis cache for this trip to ensure fresh seat availability data
-        invalidate_seats_cache(booking_data.trip_id)
-        logger.info(f"[CACHE INVALIDATE] Cleared cache for trip_id={booking_data.trip_id}")
+        # Get trip details for cache invalidation (source, destination, travel_date)
+        try:
+            # Load route relationship if not already loaded
+            trip_with_route = db.query(Trip).options(joinedload(Trip.route)).filter(Trip.id == booking_data.trip_id).first()
+            if trip_with_route and trip_with_route.route:
+                source = trip_with_route.route.source_city
+                destination = trip_with_route.route.destination_city
+                travel_date_str = trip_with_route.departure_time.date().isoformat()
+
+                invalidate_booking_cache(booking_data.trip_id, source, destination, travel_date_str)
+                logger.info(f"[CACHE INVALIDATE] Clearing stale data for Trip ID {booking_data.trip_id}")
+            else:
+                logger.warning(f"[CACHE INVALIDATE] Could not load route for trip {booking_data.trip_id}, skipping search cache invalidation")
+        except Exception as e:
+            # Log error but don't fail the booking - Redis failure shouldn't rollback DB commit
+            logger.error(f"[CACHE INVALIDATE] Error invalidating cache for trip {booking_data.trip_id}: {type(e).__name__}: {e}")
+            # Continue with the response - booking is already committed
 
         # Trigger Celery task to release unpaid seats after 10 minutes
         booking_ids = [b.id for b in created_bookings]
         release_unpaid_seats.apply_async(args=[booking_ids], countdown=600)  # 600 seconds = 10 minutes
         logger.info(f"Scheduled release_unpaid_seats task for booking_ids: {booking_ids} (in 10 minutes)")
+        
+        # Trigger "The Reaper" - cleanup expired pending bookings via BackgroundTasks
+        # Note: For larger production scale, this should be moved to Celery Beat cron job
+        background_tasks.add_task(cleanup_expired_bookings, db)
+        logger.info("[REAPER] Triggered cleanup of expired pending bookings")
         
         # Log successful booking creation with structured data
         seat_ids = [b.seat_id for b in created_bookings]
@@ -243,9 +273,37 @@ def create_booking(
 
 
 @router.get("/{booking_id}", response_model=BookingResponse)
-def get_booking(booking_id: int):
-    # Placeholder - implement actual booking retrieval
-    pass
+def get_booking(booking_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get a specific booking by ID."""
+    logger.info(f"[DEBUG] Fetching booking {booking_id} for response validation")
+    
+    try:
+        # Use joinedload to ensure all related data is loaded
+        booking = (
+            db.query(Booking)
+            .options(joinedload(Booking.trip), joinedload(Booking.seat))
+            .filter(Booking.id == booking_id)
+            .first()
+        )
+        
+        # Explicitly check if booking exists
+        if not booking:
+            logger.warning(f"[DEBUG] Booking {booking_id} not found")
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        # Optional: Check if user owns this booking (security)
+        if booking.user_id != current_user.id:
+            logger.warning(f"[DEBUG] User {current_user.id} trying to access booking {booking_id} owned by user {booking.user_id}")
+            raise HTTPException(status_code=403, detail="Access denied: You can only view your own bookings")
+        
+        logger.info(f"[DEBUG] Successfully retrieved booking {booking_id} for user {current_user.id}")
+        return booking
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[DEBUG] Error fetching booking {booking_id}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch booking: {str(e)}")
 
 @router.put("/{booking_id}", response_model=BookingResponse)
 def update_booking(booking_id: int, booking: BookingUpdate):
