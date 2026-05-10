@@ -58,10 +58,15 @@ def release_unpaid_seats(self, booking_ids: List[int]):
                 logger.warning(f"[Celery Task] Booking {booking_id} not found, skipping")
                 continue
             
-            if booking.status == BookingStatus.CONFIRMED:
-                logger.info(f"[Celery Task] ACTION: SKIPPED - Booking {booking_id} is already CONFIRMED.")
+            # Strict allowlist: only PENDING bookings are eligible for auto-release.
+            # CONFIRMED, CANCELLED, and EXPIRED are explicitly ignored.
+            if booking.status != BookingStatus.PENDING:
+                logger.info(
+                    f"[Celery Task] ACTION: SKIPPED - Booking {booking_id} status is "
+                    f"{booking.status.value}, not PENDING. Worker will not touch it."
+                )
                 continue
-            
+
             if booking.status == BookingStatus.PENDING:
                 # Update status and release seat
                 booking.status = BookingStatus.CANCELLED

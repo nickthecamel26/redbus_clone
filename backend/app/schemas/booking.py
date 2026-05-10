@@ -12,6 +12,12 @@ class BookingCreate(BaseModel):
     trip_id: int
     seat_ids: List[int]
 
+class BookingCreateWithSeats(BaseModel):
+    """Create bookings with seat numbers for a trip."""
+    trip_id: int
+    seat_numbers: List[str]
+    total_amount: float
+
 class BookingUpdate(BaseModel):
     status: Optional[BookingStatus] = None
 

@@ -1,23 +1,43 @@
 import logging
 from datetime import date, datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session, joinedload
-from typing import List
+from typing import List, Optional
 
 from app.db.session import get_db
 from app.models.trip import Trip
 from app.models.route import Route
-from app.models.bus import Bus
+from app.models.bus import Bus, BusType
 from app.models.seat import Seat
 from app.models.booking import Booking, BookingStatus
 from app.schemas.trip import TripResponse, TripCreate, TripUpdate, TripSearchResult, BulkScheduleRequest
 from app.schemas.seat import SeatWithStatus, SeatWithPricing
 from app.core.redis import get_cached_seats, set_cached_seats, get_cached_search_results, set_cached_search_results, invalidate_booking_cache, clear_search_cache
+from app.api.deps import search_rate_limiter
 from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/locations", response_model=List[str])
+def get_trip_locations(db: Session = Depends(get_db)) -> List[str]:
+    """Return a sorted, de-duplicated list of every city referenced as either
+    a source or destination across all routes.
+
+    Powers the frontend autocomplete on the home page search bar.
+    Example response: ["Bangalore", "Chennai", "Coimbatore", ...]
+    """
+    sources = db.query(Route.source_city).distinct().all()
+    destinations = db.query(Route.destination_city).distinct().all()
+
+    cities = {row[0] for row in sources if row[0]} | {row[0] for row in destinations if row[0]}
+    sorted_cities = sorted(cities)
+
+    logger.info(f"[trips/locations] Returning {len(sorted_cities)} unique city names")
+    return sorted_cities
+
 
 @router.get("/", response_model=List[TripResponse])
 def get_trips(db: Session = Depends(get_db)):
@@ -35,10 +55,18 @@ def get_trips(db: Session = Depends(get_db)):
 
 @router.get("/search", response_model=List[TripSearchResult])
 def search_trips(
+    request: Request,
+    response: Response,
     source: str = Query(..., description="Source city"),
     destination: str = Query(..., description="Destination city"),
     travel_date: date = Query(..., description="Travel date (YYYY-MM-DD)"),
-    db: Session = Depends(get_db)
+    bus_types: Optional[List[str]] = Query(None, description="Filter by bus types (e.g., AC Sleeper, Non-AC Seater)"),
+    min_price: Optional[float] = Query(None, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, description="Maximum price filter"),
+    departure_window: Optional[str] = Query(None, description="Departure window: morning, afternoon, evening, night"),
+    sort_by: Optional[str] = Query("earliest", description="Sort by: price_asc, price_desc, earliest, latest"),
+    db: Session = Depends(get_db),
+    rate_limit: None = Depends(search_rate_limiter)
 ):
     """Search for trips by source, destination, and date with available seat counts."""
     print(f"DEBUG: Entered search_trips route with source={source}, destination={destination}, travel_date={travel_date}")
@@ -56,10 +84,12 @@ def search_trips(
     start_of_day = datetime.combine(travel_date, datetime.min.time())
     end_of_day = datetime.combine(travel_date, datetime.max.time())
     
-    # Query trips matching criteria
+    # Build dynamic query with filters
     print(f"[DEBUG] Search parameters: source='{source}', destination='{destination}', start_of_day={start_of_day}, end_of_day={end_of_day}")
+    print(f"[DEBUG] Filters - bus_types={bus_types}, min_price={min_price}, max_price={max_price}, departure_window={departure_window}, sort_by={sort_by}")
     
-    trips = (
+    # Base query with joins
+    query = (
         db.query(Trip)
         .join(Route)
         .join(Bus)
@@ -67,8 +97,69 @@ def search_trips(
         .filter(Route.destination_city.ilike(f"%{destination}%"))
         .filter(Trip.departure_time.between(start_of_day, end_of_day))
         .options(joinedload(Trip.route), joinedload(Trip.bus))
-        .all()
     )
+    
+    # Apply bus type filter
+    if bus_types:
+        bus_type_conditions = []
+        for bus_type in bus_types:
+            if "AC Sleeper" in bus_type:
+                bus_type_conditions.append(Bus.bus_type == BusType.AC_SLEEPER)
+            elif "Non-AC Sleeper" in bus_type:
+                bus_type_conditions.append(Bus.bus_type == BusType.NON_AC_SLEEPER)
+            elif "AC Seater" in bus_type:
+                bus_type_conditions.append(Bus.bus_type == BusType.AC_SEATER)
+            elif "Non-AC Seater" in bus_type:
+                bus_type_conditions.append(Bus.bus_type == BusType.NON_AC_SEATER)
+        
+        if bus_type_conditions:
+            from sqlalchemy import or_
+            query = query.filter(or_(*bus_type_conditions))
+    
+    # Apply price range filter
+    if min_price is not None:
+        query = query.filter(Trip.price >= float(min_price))
+    
+    if max_price is not None:
+        query = query.filter(Trip.price <= float(max_price))
+    
+    # Apply departure window filter
+    if departure_window:
+        morning_start = start_of_day.replace(hour=6, minute=0)
+        morning_end = start_of_day.replace(hour=12, minute=0)
+        afternoon_start = start_of_day.replace(hour=12, minute=0)
+        afternoon_end = start_of_day.replace(hour=18, minute=0)
+        evening_start = start_of_day.replace(hour=18, minute=0)
+        evening_end = start_of_day.replace(hour=23, minute=59)
+        night_start = start_of_day.replace(hour=0, minute=0)
+        night_end = start_of_day.replace(hour=6, minute=0)
+        
+        from sqlalchemy import or_
+        if departure_window.lower() == "morning":
+            query = query.filter(Trip.departure_time.between(morning_start, morning_end))
+        elif departure_window.lower() == "afternoon":
+            query = query.filter(Trip.departure_time.between(afternoon_start, afternoon_end))
+        elif departure_window.lower() == "evening":
+            query = query.filter(Trip.departure_time.between(evening_start, evening_end))
+        elif departure_window.lower() == "night":
+            query = query.filter(Trip.departure_time.between(night_start, night_end))
+    
+    # Apply sorting
+    if sort_by:
+        if sort_by.lower() == "price_asc":
+            query = query.order_by(Trip.price.asc())
+        elif sort_by.lower() == "price_desc":
+            query = query.order_by(Trip.price.desc())
+        elif sort_by.lower() == "earliest":
+            query = query.order_by(Trip.departure_time.asc())
+        elif sort_by.lower() == "latest":
+            query = query.order_by(Trip.departure_time.desc())
+    else:
+        # Default sort by earliest departure
+        query = query.order_by(Trip.departure_time.asc())
+    
+    # Execute query
+    trips = query.all()
     
     print(f"[DEBUG] Found {len(trips)} trips before filtering")
     

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from typing import List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
@@ -14,12 +14,14 @@ from app.models.seat import Seat
 from app.models.bus import Bus
 from app.models.route import Route
 from app.models.user import User
-from app.schemas.booking import BookingResponse, BookingCreate, BookingUpdate, BookingSummary, MyBooking
+from app.schemas.booking import BookingResponse, BookingCreate, BookingUpdate, BookingSummary, MyBooking, BookingCreateWithSeats
+from app.crud.booking import create_with_seats
 from app.core.security import get_current_user
 from app.core.logger import logger
 from app.core.redis import invalidate_booking_cache
 from app.crud.booking import cleanup_expired_bookings
 from app.tasks import release_unpaid_seats
+from app.api.deps import booking_rate_limiter
 router = APIRouter()
 
 @router.get("/", response_model=List[BookingResponse])
@@ -78,16 +80,20 @@ def get_my_bookings(
 
 @router.post("/", response_model=BookingSummary)
 def create_booking(
-    booking_data: BookingCreate, 
+    booking_data: BookingCreateWithSeats,
     background_tasks: BackgroundTasks,
+    request: Request,
+    response: Response,
+    rate_limit: None = Depends(booking_rate_limiter),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Create bookings for multiple seats on a trip with pessimistic locking."""
-    # Use authenticated user's ID instead of hardcoded value
+    """Create multiple bookings for seats on a trip."""
+    logger.info(f"BOOKING_REQUEST: user_id={current_user.id}, trip_id={booking_data.trip_id}, seat_numbers={booking_data.seat_numbers}")
+
     user_id = current_user.id
     
-    logger.info(f"Creating booking for trip_id={booking_data.trip_id}, seat_ids={booking_data.seat_ids}")
+    logger.info(f"Creating booking for trip_id={booking_data.trip_id}, seat_numbers={booking_data.seat_numbers}")
     
     # Get the trip to check price (outside transaction, read-only)
     trip = db.query(Trip).filter(Trip.id == booking_data.trip_id).first()
@@ -101,16 +107,21 @@ def create_booking(
     try:
         # Step 1: Lock the seats for update (pessimistic locking)
         # This prevents other transactions from modifying these rows until we commit
+        logger.info(f"[DEBUG] Searching for seats: {booking_data.seat_numbers} on bus_id={trip.bus_id}")
         seats = (
             db.query(Seat)
-            .filter(Seat.id.in_(booking_data.seat_ids))
+            .filter(
+                Seat.bus_id == trip.bus_id,
+                Seat.seat_number.in_(booking_data.seat_numbers)
+            )
             .with_for_update(nowait=True)  # Lock rows, fail fast if already locked
             .all()
         )
+        logger.info(f"[DEBUG] Found {len(seats)} seats: {[f'{s.id}:{s.seat_number}' for s in seats]}")
 
-        if len(seats) != len(booking_data.seat_ids):
+        if len(seats) != len(booking_data.seat_numbers):
             logger.error(
-                f"Some seats not found. Requested: {booking_data.seat_ids}, "
+                f"Some seats not found. Requested: {booking_data.seat_numbers}, "
                 f"Found: {[s.id for s in seats]}"
             )
             raise HTTPException(status_code=400, detail="Some seats not found")
@@ -146,7 +157,7 @@ def create_booking(
             db.query(Booking)
             .filter(
                 Booking.trip_id == booking_data.trip_id,
-                Booking.seat_id.in_(booking_data.seat_ids),
+                Booking.seat_id.in_([s.id for s in seats]),
                 Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.PENDING])
             )
             .all()
@@ -184,7 +195,7 @@ def create_booking(
                 user_id=user_id,
                 trip_id=booking_data.trip_id,
                 seat_id=seat.id,
-                status=BookingStatus.PENDING,
+                status=BookingStatus.CONFIRMED,
                 total_price=total_price
             )
             db.add(booking)
@@ -235,7 +246,7 @@ def create_booking(
         
         # Log successful booking creation with structured data
         seat_ids = [b.seat_id for b in created_bookings]
-        logger.info(f"BOOKING_CREATED: user_id={user_id}, trip_id={booking_data.trip_id}, booking_ids={booking_ids}, seat_ids={seat_ids}")
+        logger.info(f"BOOKING_CREATED: user_id={user_id}, trip_id={booking_data.trip_id}, booking_ids={booking_ids}, seat_numbers={booking_data.seat_numbers}")
         
         logger.info(f"Successfully created {len(created_bookings)} bookings")
         

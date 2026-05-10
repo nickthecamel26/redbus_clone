@@ -1,11 +1,15 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.models.base import Base
 
 class Seat(Base):
     __tablename__ = "seats"
-    
+    __table_args__ = (
+        # A given bus can only have one seat with a particular seat_number.
+        UniqueConstraint("bus_id", "seat_number", name="uq_seats_bus_id_seat_number"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     bus_id = Column(Integer, ForeignKey("buses.id"), nullable=False)
     seat_number = Column(String(10), nullable=False)
